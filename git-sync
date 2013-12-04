@@ -1,0 +1,239 @@
+#!/usr/bin/perl
+
+=pod
+
+=head1 NAME
+
+git-sync - Synchronize remote Git repositories with local repository.
+
+=head1 SYNOPSIS
+
+  git-sync { -? | --help }
+  git-sync [ [ -f | --force ] ... ] [ [ -v | --verbose ] ... ]
+
+  -f, --force           Execute Git commands. Normally, just outputs what
+                        needs to be done to synchronize. Given more than
+                        once tells Git to force update (e.g., git push
+                        --force). USE AT OWN RISK.
+
+  -v, --verbose         Be verbose. Show commands executed to synchronize
+                        the remotes. When given more than once then be
+                        very verbose and show all commands.
+
+  This is a hacked up Perl program to synchronize remote repositories with
+  the local one. It was basically written while I had two remote "backup"
+  repositories that I would synchronize with my local repository. None of
+  these repositories were published for anyone else. For this to remain
+  useful in use-cases where there are "stable" or "published" remotes then
+  we'll need options and/or config to mark them as such so they are
+  excepted from the ususal rules, etc.
+
+  The way that it currently works is that it gathers a list of remote
+  repositories and both local and remote branches, determines whether they
+  exist on both sides, and either adds or deletes them from the remote, or
+  pushes the changes up to the remote. Branches that haven't been pushed
+  to any remotes yet will be pushed to all of them currently. Branches
+  that do exist on remotes will only be pushed to those remotes where they
+  already exist. It is assumed that branch names match on both ends. There
+  is currently no work done to use gitconfig to determine the correct
+  upstream branches.
+
+  The code was written without much thought and originally was based on
+  `git branch -a'. It still is, but now it is also based on `git remote'.
+  There is likely a much better way to do this, and perhaps even CPAN
+  modules that would make it a lot easier and more reliable. This isn't
+  intended to be production-quality code. More or less just a helper,
+  which is why it doesn't actually do anything by default, and lets you
+  review what it wants to do before you let it.
+
+=cut
+
+use v5.012;
+use strict;
+use utf8;
+use warnings;
+
+use Data::Dumper;
+use Getopt::Long qw/GetOptionsFromArray HelpMessage
+        :config auto_help bundling no_auto_abbrev no_getopt_compat
+        no_ignore_case_always no_require_order permute/;
+
+exit main();
+
+sub fetch_remotes {
+    my ($remotes) = @_;
+    my $success = 1;
+
+    for my $remote (@$remotes) {
+        my ($status) = sig_system(qw/git fetch/, $remote);
+
+        $success = 0 unless $status == 0;
+    }
+
+    return $success;
+}
+
+sub get_branches {
+    my ($remotes) = @_;
+
+    open my $fh, '-|', 'git branch -a' or die 'open pipe: ' . $!;
+
+    my %branches;
+
+    while(my $line = <$fh>) {
+        chomp $line;
+        next if $line =~ /->/;
+        $line =~ /^\*?\s*(.+)(?=\s+->)?/ or die 'parse failure: ' . $line;
+        my $ref = $1;
+        $ref =~ m{/?([^/]+)$};
+        my $branch = $1;
+        my $remote;
+        if((($remote) = $ref =~ m{^remotes/([^/]+)/$branch}) &&
+                $remote ~~ $remotes) {
+            push @{$branches{$branch}{remotes}{$remote}}, $ref;
+        } elsif($ref =~ m{/}) {
+            push @{$branches{$branch}{unknowns}}, $ref;
+        } else {
+            $branches{$branch}{local} = $ref;
+        }
+    }
+
+    return \%branches;
+}
+
+sub get_remotes {
+    open my $fh, '-|', 'git remote' or do {
+        warn 'open pipe: ' . $!;
+        return ();
+    };
+
+    chomp(my @remotes = <$fh>);
+
+    close $fh or warn 'close pipe: ' . $!;
+
+    return \@remotes;
+}
+
+sub main {
+    my $config = parse_args(@ARGV);
+    my $remotes = get_remotes();
+
+    unless(fetch_remotes($remotes)) {
+        say STDERR "Failed to fetch all remotes. Aborting..";
+        return 1;
+    }
+
+    my $branches = get_branches($remotes);
+
+    unless(sync_branches($branches, $remotes, $config)) {
+        say STDERR "Failed to sync all branches.";
+        return 1;
+    }
+
+    return 0;
+}
+
+sub parse_args {
+    my @args = @_;
+
+    my %config = (
+        force => 0,
+        verbose => 0,
+    );
+
+    my %opts = (
+        'f|force' => sub { $config{force}++; },
+        'v|verbose' => sub { $config{verbose}++ },
+    );
+
+    GetOptionsFromArray(\@args, %opts) or exit 1;
+
+    return \%config;
+}
+
+sub sig_system {
+    system(@_);
+    my $sig = $? & 127;
+    my $status = $? >> 8 // 0;
+    kill $sig, $$ if $sig;
+    return ($status, $sig);
+}
+
+sub sync_branches {
+    my ($branches, $remotes, $config) = @_;
+    my $success = 1;
+    my $work = 0;
+
+    for my $name (sort keys %$branches) {
+        my $branch = $branches->{$name};
+        my $branch_remotes = $branch->{remotes};
+        my $unknowns = $branch->{unknowns};
+        my $local = do {
+            no warnings;
+            $branch->{local};
+        };
+        my $has_remotes = ref $branch_remotes eq 'HASH';
+        if($has_remotes && defined $local) {
+            for my $rname (sort keys %$branch_remotes) {
+                my $remote_branches = $branch_remotes->{$rname};
+                for my $branch (@$remote_branches) {
+                    my @cmd = (qw/git diff --quiet/,
+                            $name . '..' . $branch);
+                    say join ' ', @cmd if $config->{verbose} > 1;
+                    my ($status) = sig_system(@cmd);
+                    unless($status == 0) {
+                        $work = 1;
+                        my @cmd = (qw/git push/, $rname, $name);
+                        push @cmd, '--force' if $config->{force} > 1;
+                        say 'U', ' ' x 4,
+                                $name, ' -> ', $rname, '(', $branch, ')';
+                        say join ' ', @cmd if $config->{verbose};
+                        if($config->{force}) {
+                            my ($status, $sig) = sig_system(@cmd);
+                            $success = 0 unless $status == 0;
+                        }
+                    }
+                }
+            }
+        } elsif($has_remotes) {
+            $work = 1;
+            for my $rname (sort keys %$branch_remotes) {
+                my $remote_branches = $branch_remotes->{$rname};
+                for my $branch (@$remote_branches) {
+                    my @cmd = (qw/git push/, $rname, ':' . $name);
+                    push @cmd, '--force' if $config->{force} > 1;
+                    say 'D', ' ' x 4,
+                            $rname, '(', $branch, ')';
+                    say join ' ', @cmd if $config->{verbose};
+                    if($config->{force}) {
+                        my ($status, $sig) = sig_system(@cmd);
+                        $success = 0 unless $status == 0;
+                    }
+                }
+            }
+        } elsif(defined $local) {
+            $work = 1;
+            for (@$remotes) {
+                my @cmd = (qw/git push/, $_, $local);
+                say 'A', ' ' x 4, $name, ' -> ', $_;
+                say join ' ', @cmd if $config->{verbose};
+                if($config->{force}) {
+                    my ($status, $sig) = sig_system(@cmd);
+                    $success = 0 unless $status == 0;
+                }
+            }
+        } elsif(ref $unknowns) {
+            say STDERR "$name: only unknowns";
+        } else {
+            say STDERR "$name: ...dno?";
+            say STDERR Dumper $branch;
+        }
+    }
+    if($work) {
+        say STDERR 'USE AT OWN RISK; use --force to execute'
+                unless $config->{force};
+    } else {
+        say 'Everything appears synchronized.';
+    }
+    return $success;
+}

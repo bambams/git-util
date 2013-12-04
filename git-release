@@ -1,0 +1,213 @@
+#!/bin/bash
+
+gitflags=()
+push=0;
+remotes=();
+ref='';
+refs=()
+
+die() {
+    warn "$@";
+    exit 1;
+}
+
+list() {
+    if [ ${#refs} == 0 ]; then
+        refs=($(git for-each-ref \
+                '--format=%(refname)' \
+                'refs/releases/*' \
+                ));
+    fi;
+
+    for f in "${refs[@]}"; do
+        local n="$(basename "$f")";
+        echo "$(git rev-parse "$f") $(git rev-list "$f" | wc -l) $n";
+    done | sort;
+}
+
+main() {
+    parse-args "$@";
+
+    if [ -z "$ref" ]; then
+        list;
+        exit $?;
+    fi;
+
+    update-refs;
+}
+
+parse-args() {
+    local opts="$(getopt \
+            --options ?d:fNP::p: \
+            --long demo,force,help,no-push,production,push \
+            -- \
+            "$@" \
+            )";
+
+    if [ $? != 0 ]; then
+        die "$(usage)";
+    fi;
+
+    eval set -- "$opts";
+
+    while [ $# != 0 ]; do
+        case "$1" in
+            -d|--demo|-p|--production)
+                refs=("${refs[@]}" $(parse-refs "$1" "$2"));
+                shift 2;
+                ;;
+            -f|--force)
+                gitflags=("${gitflags[@]}" "--force");
+                shift 2;
+                ;;
+            -\?|--help)
+                usage;
+                exit 0;
+                ;;
+            -N|--no-push)
+                push=0;
+                shift;
+                ;;
+            -P|--push)
+                push=1;
+                if [ ! -z "$2" ]; then
+                    remotes=("${remotes[@]}" "$2");
+                fi;
+                shift 2;
+                ;;
+            --)
+                shift;
+                break;
+                ;;
+            *) die "Internal error: unknown option: $1";;
+        esac;
+    done;
+
+    ref="$1";
+}
+
+parse-refs() {
+    local server="$1";
+    local types="$2";
+    local base='';
+    local refs=();
+    local suffix='';
+
+    case "$server" in
+        -d|--demo) base="DEMO";;
+        -p|--production) base="PRODUCTION";;
+        *) die "Internal error: unknown server: $server";;
+    esac;
+
+    types=($(perl -E '
+            my ($types) = @ARGV;
+
+            if($types =~ /,/) {
+                say join " ", split /,/, $types;
+            } else {
+                say join " ", split //, $types;
+            }
+            ' "$types"));
+
+    if [ $? != 0 ]; then
+        exit 1;
+    fi;
+
+    set -- "${types[@]}";
+
+    while [ $# != 0 ]; do
+        case "$1" in
+            d|db) refs=("${refs[@]}" "${base}_DB"); shift;;
+            s|daemon) refs=("${refs[@]}" "${base}_DAEMON"); shift;;
+            w|www) refs=("${refs[@]}" "${base}_WWW"); shift;;
+            *) die "Invalid installation type: $1";;
+        esac;
+    done;
+
+    echo "${refs[@]}";
+}
+
+update-refs() {
+    for f in "${refs[@]}"; do
+        git update-ref "refs/releases/$f" "$ref" || exit 1;
+
+        if [ "$push" == 1 ]; then
+            if [ ${#remotes} == 0 ]; then
+                remotes=($(git remote));
+            fi;
+
+            for g in "${remotes[@]}"; do
+                git push "$g" "refs/releases/$f" || exit 1;
+            done;
+        fi;
+    done;
+}
+
+usage() {
+    cat <<EOF;
+git release { -? | --help }
+git release [ -f | --force ] [ -N | -P | --push[={REMOTE...}] ]
+           [ -d | --demo=TYPES ] [ -p | --production=TYPES ]
+           [ REF ]
+
+Use this to track server instance versions. This does not actually install
+anything to the server [yet]. It is only meant to help you track what you
+have installed on the server so you know where you left off from.
+
+TYPES define the corresponding installation type for each server. See
+details below.
+
+REF is just a git ref that refers to any commit. See gitrevisions(7). If
+this is specified then each DEST will be updated to it. Otherwise, the
+existing DESTs will just be printed out.
+
+    -?, --help      Show this message and quit.
+
+    -f, --force     By default only fast-forward updates are allowed. You
+                    can use this to override that (which may rewrite
+                    published history!).
+
+    -N, --no-push
+    -P, --push[={REMOTE...}]    Push to remotes. By default, all of them.
+                                Specify remotes to limit it to only those
+                                ones (default).
+
+                                Similarly, --no-push (which does not
+                                accept a list) disables the push.
+
+How to specify which installations and types:
+
+    -d, --demo=TYPE
+
+    -p, --production=TYPE
+
+Valid TYPEs are:
+
+    d, db       This represents the database server and applies to
+                scripts in $GIT_WORK_TREE/db/.
+
+    s, daemon   This represents a daemon process.
+
+    w, www      This represents the Web site and applies to the Web root
+                on the Web server.
+
+Examples:
+
+1. Advance the demo database and Web site to master~3.
+
+    git release -ddw master~3
+    git release --demo=db,www master~3
+
+2. Advance the demo and production Windows service instances to
+   origin/master.
+
+    git release -ds -ps origin/master
+    git release --demo=daemon --production=daemon origin/master
+EOF
+}
+
+warn() {
+    echo "$@" 1>&2;
+}
+
+main "$@";
