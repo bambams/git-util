@@ -1,0 +1,14 @@
+#!/usr/bin/env perl
+
+use v5.012;
+use strict;
+use warnings;
+
+use File::Slurp qw/slurp/;
+
+chomp(my $root = `git-root`);
+my $path = "$root/.gitdepends";
+
+if (-f $path) {
+    system('cat', $path);
+}
