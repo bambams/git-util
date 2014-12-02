@@ -24,7 +24,7 @@ upstream() {
 
 branch="$(git branch 2>/dev/null | grep '^\*' | sed -e 's/^\* //')";
 dirty="$(git diff --exit-code HEAD &>/dev/null; echo $?)";
-depends="$(git depends-diff --exit-code HEAD &>/dev/null; echo $?)";
+depends="$(git depends '' diff --exit-code HEAD &>/dev/null; echo $?)";
 
 if [[ $(tty) =~ /dev/pt ]]; then
     branch_color='\[\e[1;32m\]';

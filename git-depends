@@ -13,18 +13,48 @@ chdir "$root" || exit $?;
 
 my $path = ".gitdepends";
 
+my ($pattern) = @ARGV;
+
+shift @ARGV;
+
+my $filter = defined $pattern ?
+        sub { @$_ && $_->[0] =~ /\Q$pattern\E/ } :
+        sub { @$_ };
+
 if (-f $path) {
     open my $fh, '<', $path or die "open: $!";
 
     chomp(my @dependencies = <$fh>);
 
+    close $fh or warn "close: $!";
+
+    @dependencies = grep $filter->(),
+            map [/^([\w]+)\s+(.*)/], @dependencies;
+
     for my $dependency (@dependencies) {
-        unless($dependency =~ /:/) {
-            $dependency = abs_path($dependency);
+        my ($name, $repo) = @$dependency;
+
+        unless($repo =~ /:/) {
+            $repo = abs_path($repo);
         }
 
-        print "$dependency\n";
-    }
+        print "$name: $repo\n";
 
-    close $fh or warn "close: $!";
+        if(@ARGV) {
+            $ENV{GIT_DIR} = "$repo/.git";
+            $ENV{GIT_WORK_TREE} = $repo;
+
+            system('git', @ARGV);
+
+            my ($status, $signal) = ($? >> 8, $? & 127);
+
+            if($signal) {
+                kill $signal, $$;
+            }
+
+            if($status) {
+                exit($status);
+            }
+        }
+    }
 }
