@@ -31,6 +31,10 @@ if (-f $path) {
     @dependencies = grep $filter->(),
             map [/^([\w]+)\s+(.*)/], @dependencies;
 
+    if (defined $pattern && !@dependencies) {
+        die "No dependencies match /\\Q$pattern\\E/.\n";
+    }
+
     for my $dependency (@dependencies) {
         my ($name, $repo) = @$dependency;
 
