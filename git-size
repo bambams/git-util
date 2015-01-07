@@ -1,0 +1,16 @@
+#!/bin/bash
+
+# Author: Jeff King <peff [-at host=] peff [-dot=] net>
+# Source: Git mailing list <git@vger.kernel.org>
+# Subject: Blobs not referenced by file (anymore) are not removed by GC
+
+# h4x: Add validation to prevent a NOP and nonsense output.
+if [[ $# == 0 ]]; then
+    echo "Warning: No objects listed. Nothing to do.";
+    exit 0;
+fi;
+
+git rev-list --objects "$@" |
+        cut -d' ' -f1 |
+        git cat-file --batch-check='%(objectsize:disk)' |
+        perl -lne '$t += $_; END { print "$t bytes" }';
