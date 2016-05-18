@@ -5,7 +5,6 @@ use strict;
 use warnings;
 
 use Cwd qw/abs_path/;
-use File::Slurp qw/slurp/;
 
 chomp(my $root = `git-root`);
 
